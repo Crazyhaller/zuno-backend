@@ -3,6 +3,16 @@ import { wsArcjet } from '../arcjet.js'
 
 const matchSubscribers = new Map()
 
+function normalizeMatchId(value) {
+  const parsed = Number.parseInt(String(value), 10)
+
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return null
+  }
+
+  return parsed
+}
+
 function subscribe(matchId, socket) {
   if (!matchSubscribers.has(matchId)) {
     matchSubscribers.set(matchId, new Set())
@@ -29,6 +39,8 @@ function cleanupSubscriptions(socket) {
   for (const matchId of socket.subscriptions) {
     unsubscribe(matchId, socket)
   }
+
+  socket.subscriptions.clear()
 }
 
 function broadcastToMatch(matchId, payload) {
@@ -77,33 +89,80 @@ function handleMessage(socket, data) {
     message = JSON.parse(data.toString())
   } catch {
     sendJson(socket, { type: 'error', message: 'Invalid JSON' })
-  }
-
-  if (message?.type === 'subscribe' && Number.isInteger(message.matchId)) {
-    subscribe(message.matchId, socket)
-    socket.subscriptions.add(message.matchId)
-    sendJson(socket, { type: 'subscribed', matchId: message.matchId })
     return
   }
 
-  if (message?.type === 'unsubscribe' && Number.isInteger(message.matchId)) {
-    unsubscribe(message.matchId, socket)
-    socket.subscriptions.delete(message.matchId)
-    sendJson(socket, { type: 'unsubscribed', matchId: message.matchId })
+  if (message?.type === 'setSubscriptions' && Array.isArray(message.matchIds)) {
+    cleanupSubscriptions(socket)
+
+    const normalizedMatchIds = []
+    for (const rawMatchId of message.matchIds) {
+      const normalizedMatchId = normalizeMatchId(rawMatchId)
+
+      if (normalizedMatchId === null) {
+        continue
+      }
+
+      subscribe(normalizedMatchId, socket)
+      socket.subscriptions.add(normalizedMatchId)
+      normalizedMatchIds.push(normalizedMatchId)
+    }
+
+    sendJson(socket, { type: 'subscriptions', matchIds: normalizedMatchIds })
+    return
+  }
+
+  if (message?.type === 'subscribe') {
+    const matchId = normalizeMatchId(message.matchId)
+    if (matchId === null) {
+      sendJson(socket, { type: 'error', message: 'Invalid matchId' })
+      return
+    }
+
+    subscribe(matchId, socket)
+    socket.subscriptions.add(matchId)
+    sendJson(socket, { type: 'subscribed', matchId })
+    return
+  }
+
+  if (message?.type === 'unsubscribe') {
+    const matchId = normalizeMatchId(message.matchId)
+    if (matchId === null) {
+      sendJson(socket, { type: 'error', message: 'Invalid matchId' })
+      return
+    }
+
+    unsubscribe(matchId, socket)
+    socket.subscriptions.delete(matchId)
+    sendJson(socket, { type: 'unsubscribed', matchId })
   }
 }
 
 export function attachWebSocketServer(server) {
   const wss = new WebSocketServer({
-    server,
-    path: '/ws',
-    maxPayload: 1024 * 1024 * 2, // 2MB
+    noServer: true,
+    maxPayload: 1024 * 1024 * 2,
   })
 
   server.on('upgrade', async (req, socket, head) => {
-    const { pathname } = new URL(req.url, `http://${req.headers.host}`)
+    const corsOrigin = process.env.CORS_ORIGIN || '*'
+    if (!req.headers.origin && corsOrigin !== '*') {
+      req.headers.origin = corsOrigin
+    }
+
+    let pathname
+
+    try {
+      pathname = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`).pathname
+    } catch {
+      socket.write('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n')
+      socket.destroy()
+      return
+    }
 
     if (pathname !== '/ws') {
+      socket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n')
+      socket.destroy()
       return
     }
 

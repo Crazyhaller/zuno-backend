@@ -8,7 +8,7 @@ export const createCommentarySchema = z.object({
   minute: z.coerce.number().int().nonnegative(),
   sequence: z.coerce.number().int().nonnegative(),
   period: z.string().optional(),
-  eventType: z.string().optional(),
+  eventType: z.string().trim().min(1),
   actor: z.string().optional(),
   team: z.string().optional(),
   message: z.string().trim().min(1),
